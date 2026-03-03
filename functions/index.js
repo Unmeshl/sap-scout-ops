@@ -20,7 +20,9 @@ const { postToSlack }            = require('./modules/slack');
 
 const { searchGmailThreads }    = require('./modules/callprep/gmailSearch');
 const { searchFirestoreRecords } = require('./modules/callprep/firestoreSearch');
+const { searchJobsCollection }   = require('./modules/callprep/jobsSearch');
 const { getCompanyIntel }        = require('./modules/callprep/companyIntel');
+const { findDecisionMakers }     = require('./modules/callprep/decisionMakers');
 const { synthesizeCallPrep }     = require('./modules/callprep/synthesizer');
 
 const CALLPREP_TOPIC = 'callprep-jobs';
@@ -115,21 +117,30 @@ exports.callprepWorker = onMessagePublished(
     const authClient = createGoogleAuthClient();
     const anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const [emailsR, recordsR, intelR] = await Promise.allSettled([
-      searchGmailThreads(authClient, query),
+    const [jobsR, candidatesR, intelR, decisionsR] = await Promise.allSettled([
+      searchJobsCollection(db, query),
       searchFirestoreRecords(db, query),
       getCompanyIntel(process.env.TAVILY_API_KEY, query),
+      findDecisionMakers(process.env.TAVILY_API_KEY, query),
     ]);
 
-    const emails  = emailsR.status  === 'fulfilled' ? emailsR.value  : [];
-    const records = recordsR.status === 'fulfilled' ? recordsR.value : [];
-    const intel   = intelR.status   === 'fulfilled' ? intelR.value   : {};
+    const jobsData        = jobsR.status       === 'fulfilled' ? jobsR.value       : { total: 0, byModule: {} };
+    const candidates      = candidatesR.status === 'fulfilled' ? candidatesR.value : [];
+    const intel           = intelR.status      === 'fulfilled' ? intelR.value      : {};
+    const decisionMakers  = decisionsR.status  === 'fulfilled' ? decisionsR.value  : [];
 
-    if (emailsR.status  === 'rejected') logger.error('callprep:gmail',    emailsR.reason?.message);
-    if (recordsR.status === 'rejected') logger.error('callprep:firestore', recordsR.reason?.message);
-    if (intelR.status   === 'rejected') logger.error('callprep:tavily',    intelR.reason?.message);
+    if (jobsR.status       === 'rejected') logger.error('callprep:jobs',     jobsR.reason?.message);
+    if (candidatesR.status === 'rejected') logger.error('callprep:pipeline',  candidatesR.reason?.message);
+    if (intelR.status      === 'rejected') logger.error('callprep:intel',     intelR.reason?.message);
+    if (decisionsR.status  === 'rejected') logger.error('callprep:decisions', decisionsR.reason?.message);
 
-    const brief = await synthesizeCallPrep(anthropicClient, { query, emails, records, intel });
+    const brief = await synthesizeCallPrep(anthropicClient, {
+      company: query,
+      jobsData,
+      candidates,
+      intel,
+      decisionMakers,
+    });
 
     if (responseUrl) {
       await fetch(responseUrl, {
@@ -139,6 +150,11 @@ exports.callprepWorker = onMessagePublished(
       });
     }
 
-    logger.info('callprep done', { query, emails: emails.length, records: records.length });
+    logger.info('callprep done', {
+      query,
+      jobs: jobsData.total,
+      candidates: candidates.length,
+      decisionMakers: decisionMakers.length,
+    });
   }
 );

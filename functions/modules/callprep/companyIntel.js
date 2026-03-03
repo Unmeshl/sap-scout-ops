@@ -2,9 +2,9 @@
 
 function buildSearches(companyName) {
   return [
-    { key: 'news',   query: `${companyName} SAP news 2026` },
-    { key: 'wins',   query: `${companyName} SAP project win partnership contract 2026` },
-    { key: 'hiring', query: `${companyName} technology hiring executive announcement 2026` },
+    { key: 'projectWins',  query: `"${companyName}" SAP project win contract announcement 2025 2026` },
+    { key: 'leadership',   query: `"${companyName}" SAP practice leadership hiring director VP 2026` },
+    { key: 'partnerships', query: `"${companyName}" SAP partnership alliance S4HANA SuccessFactors 2025 2026` },
   ];
 }
 
@@ -17,18 +17,22 @@ async function runSearch(apiKey, { key, query }) {
       query,
       search_depth: 'advanced',
       include_answer: true,
-      max_results: 3,
-      days: 30,
+      max_results: 4,
+      days: 90,
     }),
   });
   if (!res.ok) throw new Error(`Tavily ${key} ${res.status}: ${await res.text()}`);
   const data = await res.json();
-  return { key, answer: data.answer || null, results: data.results || [] };
+  return {
+    key,
+    answer: data.answer || null,
+    results: (data.results || []).map(({ title, url, content, published_date }) => ({ title, url, content, published_date })),
+  };
 }
 
 async function getCompanyIntel(apiKey, companyName) {
   const searches = buildSearches(companyName);
-  const settled = await Promise.allSettled(searches.map((s) => runSearch(apiKey, s)));
+  const settled  = await Promise.allSettled(searches.map((s) => runSearch(apiKey, s)));
 
   const output = {};
   for (let i = 0; i < searches.length; i++) {

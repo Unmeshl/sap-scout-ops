@@ -1,59 +1,77 @@
 'use strict';
 
-function formatEmails(emails) {
-  if (!emails.length) return 'No recent email threads found.';
-  return emails.map((e) =>
-    `• *${e.subject}* (${e.messageCount} msg${e.messageCount !== 1 ? 's' : ''}, last: ${e.date || 'unknown'})\n  ${e.snippet || ''}`
-  ).join('\n');
-}
+function formatJobs(jobsData) {
+  if (!jobsData || jobsData.total === 0) return '• No active SAP job postings found in database.';
 
-function formatRecords(records) {
-  if (!records.length) return 'No matching Firestore records.';
-  return records.map((r) =>
-    `• *${r.name || 'Unknown'}* — ${r.role || 'N/A'} @ ${r.company || 'N/A'} [${r.status || 'unknown'}]`
-  ).join('\n');
+  const lines = [`• Total open SAP roles: ${jobsData.total}`];
+  for (const [mod, jobs] of Object.entries(jobsData.byModule)) {
+    const oldest  = jobs[0]; // already sorted desc by daysPosted
+    const ageStr  = oldest.daysPosted !== null ? `${oldest.daysPosted}d old` : 'age unknown';
+    const stale   = jobs.some((j) => j.stale) ? ' ⚠️ stale' : '';
+    lines.push(`• ${mod}: ${jobs.length} role${jobs.length !== 1 ? 's' : ''} (oldest: ${ageStr}${stale})`);
+  }
+  return lines.join('\n');
 }
 
 function formatIntel(intel) {
   const parts = [];
-  if (intel.news?.answer)   parts.push(`_News:_ ${intel.news.answer}`);
-  if (intel.wins?.answer)   parts.push(`_Wins:_ ${intel.wins.answer}`);
-  if (intel.hiring?.answer) parts.push(`_Hiring:_ ${intel.hiring.answer}`);
-  return parts.length ? parts.join('\n') : 'No recent intel found.';
+  if (intel.projectWins?.answer)  parts.push(`_Project Wins:_ ${intel.projectWins.answer}`);
+  if (intel.leadership?.answer)   parts.push(`_Leadership/Hiring:_ ${intel.leadership.answer}`);
+  if (intel.partnerships?.answer) parts.push(`_Partnerships:_ ${intel.partnerships.answer}`);
+  return parts.length ? parts.join('\n') : '• No recent intel found.';
 }
 
-async function synthesizeCallPrep(anthropicClient, { query, emails, records, intel }) {
+function formatDecisionMakers(dms) {
+  if (!dms.length) return '• No LinkedIn profiles found.';
+  return dms.map((dm) => `• *${dm.name}* — ${dm.title}\n  ${dm.url}`).join('\n');
+}
+
+function formatCandidates(records) {
+  if (!records.length) return '• No past submissions or placements on record.';
+  return records.map((r) =>
+    `• *${r.name || 'Unknown'}* — ${r.role || 'N/A'} [${r.status || 'unknown'}]`
+  ).join('\n');
+}
+
+async function synthesizeCallPrep(anthropicClient, { company, jobsData, intel, decisionMakers, candidates }) {
   const prompt = `You are a pre-call prep assistant for an SAP staffing and consulting sales professional.
 
-The user is about to call or meet with: "${query}"
+Preparing a brief for: *${company}*
 
-Write a concise Slack-formatted brief with EXACTLY these 4 sections (use *SECTION* for headers):
+Write a concise, Slack-formatted call brief with EXACTLY these 6 sections (use *SECTION* for headers):
 
-*HISTORY* — Key context from past email threads with this contact/company
-*INTEL* — Recent company news, SAP activity, and market moves
-*PIPELINE* — Any active candidates, open roles, or past placements on record
-*TALKING POINTS* — 3 specific, personalized conversation openers based on the intel above
+*OPEN ROLES* — Their active SAP job postings grouped by module, call out stale roles (⚠️) as urgency signals
+*INTEL* — Recent SAP project wins, partnerships, and practice news
+*DECISION MAKERS* — LinkedIn profiles to target (name, title, URL)
+*PIPELINE* — Any past candidate submissions or placements on record
+*TALKING POINTS* — 3 specific conversation openers referencing their open roles and recent news
+*SUGGESTED ACTION* — One concrete next step: who to call, what to pitch, why now
 
 Rules:
-- 3-5 bullets per section max, use • for bullets
-- Be specific and actionable — no generic filler
-- If a section has no data, write a single bullet: "• No data available"
-- Talking points must reference specific intel, not be generic
+- Max 5 bullets per section. Use • for bullets.
+- Be specific — reference actual job titles, news items, names from the data.
+- Stale roles (⚠️) = been open 30+ days, signal urgency and budget confirmation.
+- Talking points must be personalized to THIS company's data, not generic.
+- Suggested action must name a specific decision maker if available.
+- If a section has no data, write: "• No data available"
 
 --- DATA ---
 
-EMAIL THREADS (last 5 with "${query}"):
-${formatEmails(emails)}
+OPEN SAP ROLES (from internal jobs database):
+${formatJobs(jobsData)}
 
-FIRESTORE RECORDS:
-${formatRecords(records)}
+COMPANY INTEL (last 90 days):
+${formatIntel(intel)}
 
-COMPANY INTEL (last 30 days):
-${formatIntel(intel)}`;
+DECISION MAKERS (LinkedIn X-ray):
+${formatDecisionMakers(decisionMakers)}
+
+PAST SUBMISSIONS / PLACEMENTS:
+${formatCandidates(candidates)}`;
 
   const response = await anthropicClient.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 1000,
+    max_tokens: 1200,
     messages: [{ role: 'user', content: prompt }],
   });
 
