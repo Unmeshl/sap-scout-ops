@@ -2,11 +2,13 @@
 
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onRequest } = require('firebase-functions/v2/https');
+const { onMessagePublished } = require('firebase-functions/v2/pubsub');
 const { setGlobalOptions } = require('firebase-functions/v2');
 const logger = require('firebase-functions/logger');
 const { initializeApp, getApps } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const Anthropic = require('@anthropic-ai/sdk');
+const { PubSub } = require('@google-cloud/pubsub');
 
 const { createGoogleAuthClient } = require('./modules/googleAuth');
 const { getTodaysEvents }        = require('./modules/calendar');
@@ -15,6 +17,13 @@ const { getStaleCandidates }     = require('./modules/pipeline');
 const { getSAPMarketNews }       = require('./modules/marketIntel');
 const { synthesizeBriefing }     = require('./modules/synthesizer');
 const { postToSlack }            = require('./modules/slack');
+
+const { searchGmailThreads }    = require('./modules/callprep/gmailSearch');
+const { searchFirestoreRecords } = require('./modules/callprep/firestoreSearch');
+const { getCompanyIntel }        = require('./modules/callprep/companyIntel');
+const { synthesizeCallPrep }     = require('./modules/callprep/synthesizer');
+
+const CALLPREP_TOPIC = 'callprep-jobs';
 
 if (!getApps().length) initializeApp();
 setGlobalOptions({ maxInstances: 1 });
@@ -68,5 +77,68 @@ exports.morningIntelTrigger = onRequest(
   async (req, res) => {
     await runPipeline();
     res.status(200).send('Done');
+  }
+);
+
+// ── callprep ──────────────────────────────────────────────────────────────────
+
+exports.callprep = onRequest(
+  { timeoutSeconds: 10, memory: '256MiB' },
+  async (req, res) => {
+    const query = (req.body?.text || '').trim();
+    const responseUrl = req.body?.response_url;
+
+    if (!query) {
+      return res.status(200).json({ text: 'Usage: `/callprep [company or contact name]`' });
+    }
+
+    const pubsub = new PubSub();
+    await pubsub.topic(CALLPREP_TOPIC).publishMessage({
+      data: Buffer.from(JSON.stringify({ query, responseUrl })),
+    });
+
+    res.status(200).json({
+      response_type: 'ephemeral',
+      text: `🔍 Preparing call brief for *${query}*... check back in ~30 seconds.`,
+    });
+  }
+);
+
+exports.callprepWorker = onMessagePublished(
+  { topic: CALLPREP_TOPIC, timeoutSeconds: 300, memory: '512MiB' },
+  async (event) => {
+    const { query, responseUrl } = JSON.parse(
+      Buffer.from(event.data.message.data, 'base64').toString()
+    );
+
+    const db = getFirestore();
+    const authClient = createGoogleAuthClient();
+    const anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    const [emailsR, recordsR, intelR] = await Promise.allSettled([
+      searchGmailThreads(authClient, query),
+      searchFirestoreRecords(db, query),
+      getCompanyIntel(process.env.TAVILY_API_KEY, query),
+    ]);
+
+    const emails  = emailsR.status  === 'fulfilled' ? emailsR.value  : [];
+    const records = recordsR.status === 'fulfilled' ? recordsR.value : [];
+    const intel   = intelR.status   === 'fulfilled' ? intelR.value   : {};
+
+    if (emailsR.status  === 'rejected') logger.error('callprep:gmail',    emailsR.reason?.message);
+    if (recordsR.status === 'rejected') logger.error('callprep:firestore', recordsR.reason?.message);
+    if (intelR.status   === 'rejected') logger.error('callprep:tavily',    intelR.reason?.message);
+
+    const brief = await synthesizeCallPrep(anthropicClient, { query, emails, records, intel });
+
+    if (responseUrl) {
+      await fetch(responseUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response_type: 'in_channel', text: brief }),
+      });
+    }
+
+    logger.info('callprep done', { query, emails: emails.length, records: records.length });
   }
 );
