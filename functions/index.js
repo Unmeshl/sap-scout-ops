@@ -66,7 +66,7 @@ exports.morningIntel = onSchedule(
 exports.morningIntelTrigger = onRequest(
   { timeoutSeconds: 300, memory: '256MiB' },
   async (req, res) => {
-    res.status(200).send('Running morning intel...');
     await runPipeline();
+    res.status(200).send('Done');
   }
 );
