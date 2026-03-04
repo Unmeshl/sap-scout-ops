@@ -18,12 +18,11 @@ const { getSAPMarketNews }       = require('./modules/marketIntel');
 const { synthesizeBriefing }     = require('./modules/synthesizer');
 const { postToSlack }            = require('./modules/slack');
 
-const { searchGmailThreads }    = require('./modules/callprep/gmailSearch');
-const { searchFirestoreRecords } = require('./modules/callprep/firestoreSearch');
-const { searchJobsCollection }   = require('./modules/callprep/jobsSearch');
-const { getCompanyIntel }        = require('./modules/callprep/companyIntel');
-const { findDecisionMakers }     = require('./modules/callprep/decisionMakers');
-const { synthesizeCallPrep }     = require('./modules/callprep/synthesizer');
+const { searchJobsCollection }           = require('./modules/callprep/jobsSearch');
+const { getCompanyProfile,
+        getDecisionMakersFromDB }         = require('./modules/callprep/companyProfile');
+const { getCompanyIntel }                = require('./modules/callprep/companyIntel');
+const { synthesizeCallPrep }             = require('./modules/callprep/synthesizer');
 
 const CALLPREP_TOPIC = 'callprep-jobs';
 
@@ -114,30 +113,36 @@ exports.callprepWorker = onMessagePublished(
     );
 
     const db = getFirestore();
-    const authClient = createGoogleAuthClient();
     const anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const [jobsR, candidatesR, intelR, decisionsR] = await Promise.allSettled([
+    // Step 1: fetch jobs + company profile in parallel (both give us companyDomain)
+    const [jobsR, profileR, intelR] = await Promise.allSettled([
       searchJobsCollection(db, query),
-      searchFirestoreRecords(db, query),
+      getCompanyProfile(db, query),
       getCompanyIntel(process.env.TAVILY_API_KEY, query),
-      findDecisionMakers(process.env.TAVILY_API_KEY, query),
     ]);
 
-    const jobsData        = jobsR.status       === 'fulfilled' ? jobsR.value       : { total: 0, byModule: {} };
-    const candidates      = candidatesR.status === 'fulfilled' ? candidatesR.value : [];
-    const intel           = intelR.status      === 'fulfilled' ? intelR.value      : {};
-    const decisionMakers  = decisionsR.status  === 'fulfilled' ? decisionsR.value  : [];
+    const jobsData = jobsR.status    === 'fulfilled' ? jobsR.value    : { total: 0, byModule: {}, companyDomain: null };
+    const profile  = profileR.status === 'fulfilled' ? profileR.value : null;
+    const intel    = intelR.status   === 'fulfilled' ? intelR.value   : {};
 
-    if (jobsR.status       === 'rejected') logger.error('callprep:jobs',     jobsR.reason?.message);
-    if (candidatesR.status === 'rejected') logger.error('callprep:pipeline',  candidatesR.reason?.message);
-    if (intelR.status      === 'rejected') logger.error('callprep:intel',     intelR.reason?.message);
-    if (decisionsR.status  === 'rejected') logger.error('callprep:decisions', decisionsR.reason?.message);
+    if (jobsR.status    === 'rejected') logger.error('callprep:jobs',    jobsR.reason?.message);
+    if (profileR.status === 'rejected') logger.error('callprep:profile', profileR.reason?.message);
+    if (intelR.status   === 'rejected') logger.error('callprep:intel',   intelR.reason?.message);
+
+    // Step 2: look up decision makers using domain (prefer jobs_norm domain, fall back to companies)
+    const companyDomain = jobsData.companyDomain || profile?.companyDomain || null;
+    const decisionMakers = companyDomain
+      ? await getDecisionMakersFromDB(db, companyDomain).catch((e) => {
+          logger.error('callprep:decisions', e.message);
+          return [];
+        })
+      : [];
 
     const brief = await synthesizeCallPrep(anthropicClient, {
       company: query,
+      profile,
       jobsData,
-      candidates,
       intel,
       decisionMakers,
     });
@@ -153,8 +158,8 @@ exports.callprepWorker = onMessagePublished(
     logger.info('callprep done', {
       query,
       jobs: jobsData.total,
-      candidates: candidates.length,
       decisionMakers: decisionMakers.length,
+      companyDomain,
     });
   }
 );

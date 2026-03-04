@@ -1,73 +1,78 @@
 'use strict';
 
 function formatJobs(jobsData) {
-  if (!jobsData || jobsData.total === 0) return '• No active SAP job postings found in database.';
-
+  if (!jobsData || jobsData.total === 0) return '• No active SAP job postings found.';
   const lines = [`• Total open SAP roles: ${jobsData.total}`];
   for (const [mod, jobs] of Object.entries(jobsData.byModule)) {
-    const oldest  = jobs[0]; // already sorted desc by daysPosted
-    const ageStr  = oldest.daysPosted !== null ? `${oldest.daysPosted}d old` : 'age unknown';
-    const stale   = jobs.some((j) => j.stale) ? ' ⚠️ stale' : '';
-    lines.push(`• ${mod}: ${jobs.length} role${jobs.length !== 1 ? 's' : ''} (oldest: ${ageStr}${stale})`);
+    const oldest = jobs[0];
+    const ageStr = oldest.daysPosted !== null ? `${oldest.daysPosted}d old` : 'age unknown';
+    const staleFlag = jobs.some((j) => j.stale) ? ' ⚠️' : '';
+    lines.push(`• ${mod}: ${jobs.length} role${jobs.length !== 1 ? 's' : ''} (oldest: ${ageStr}${staleFlag})`);
   }
   return lines.join('\n');
+}
+
+function formatProfile(profile) {
+  if (!profile) return '• No company profile found in database.';
+  const lines = [];
+  if (profile.tier) lines.push(`• Tier: *${profile.tier.toUpperCase()}*`);
+  if (profile.sapModules?.length) lines.push(`• SAP modules in use: ${profile.sapModules.join(', ')}`);
+  if (profile.website) lines.push(`• Website: ${profile.website}`);
+  return lines.length ? lines.join('\n') : '• No profile details available.';
 }
 
 function formatIntel(intel) {
   const parts = [];
   if (intel.projectWins?.answer)  parts.push(`_Project Wins:_ ${intel.projectWins.answer}`);
-  if (intel.leadership?.answer)   parts.push(`_Leadership/Hiring:_ ${intel.leadership.answer}`);
+  if (intel.leadership?.answer)   parts.push(`_Leadership:_ ${intel.leadership.answer}`);
   if (intel.partnerships?.answer) parts.push(`_Partnerships:_ ${intel.partnerships.answer}`);
-  return parts.length ? parts.join('\n') : '• No recent intel found.';
+  return parts.length ? parts.join('\n') : '• No recent web intel found.';
 }
 
 function formatDecisionMakers(dms) {
-  if (!dms.length) return '• No LinkedIn profiles found.';
-  return dms.map((dm) => `• *${dm.name}* — ${dm.title}\n  ${dm.url}`).join('\n');
+  if (!dms.length) return '• No decision makers found in database.';
+  return dms.slice(0, 5).map((dm) => {
+    const contact = [dm.email, dm.phone].filter(Boolean).join(' | ');
+    const linkedin = dm.linkedin ? `\n  🔗 ${dm.linkedin}` : '';
+    return `• *${dm.name}* — ${dm.title || 'Unknown title'}${contact ? `\n  📧 ${contact}` : ''}${linkedin}`;
+  }).join('\n');
 }
 
-function formatCandidates(records) {
-  if (!records.length) return '• No past submissions or placements on record.';
-  return records.map((r) =>
-    `• *${r.name || 'Unknown'}* — ${r.role || 'N/A'} [${r.status || 'unknown'}]`
-  ).join('\n');
-}
-
-async function synthesizeCallPrep(anthropicClient, { company, jobsData, intel, decisionMakers, candidates }) {
+async function synthesizeCallPrep(anthropicClient, { company, profile, jobsData, intel, decisionMakers }) {
   const prompt = `You are a pre-call prep assistant for an SAP staffing and consulting sales professional.
 
-Preparing a brief for: *${company}*
+Preparing a brief for a call/meeting with: *${company}*
 
-Write a concise, Slack-formatted call brief with EXACTLY these 6 sections (use *SECTION* for headers):
+Write a Slack-formatted call brief with EXACTLY these 6 sections (use *SECTION* for bold headers):
 
-*OPEN ROLES* — Their active SAP job postings grouped by module, call out stale roles (⚠️) as urgency signals
-*INTEL* — Recent SAP project wins, partnerships, and practice news
-*DECISION MAKERS* — LinkedIn profiles to target (name, title, URL)
-*PIPELINE* — Any past candidate submissions or placements on record
-*TALKING POINTS* — 3 specific conversation openers referencing their open roles and recent news
-*SUGGESTED ACTION* — One concrete next step: who to call, what to pitch, why now
+*OPEN ROLES* — Their active SAP job postings by module; flag ⚠️ stale roles as hot opportunities
+*COMPANY PROFILE* — Their SAP footprint (modules in use), tier classification, any key context
+*INTEL* — Recent SAP project wins, leadership moves, partnerships from the web
+*DECISION MAKERS* — Key contacts from our database with title, email, phone, LinkedIn
+*TALKING POINTS* — 3 specific, personalized conversation openers based on their open roles and news
+*SUGGESTED ACTION* — One concrete next step: who to contact first, what to pitch, why now
 
 Rules:
 - Max 5 bullets per section. Use • for bullets.
-- Be specific — reference actual job titles, news items, names from the data.
-- Stale roles (⚠️) = been open 30+ days, signal urgency and budget confirmation.
-- Talking points must be personalized to THIS company's data, not generic.
+- Be direct and specific — reference actual job titles, module names, contact names from the data.
+- Stale roles (⚠️ open 30+ days) signal urgency: budget is confirmed, they're struggling to fill.
+- Talking points must reference THIS company's specific data — no generic openers.
 - Suggested action must name a specific decision maker if available.
-- If a section has no data, write: "• No data available"
+- If a section has no data: "• No data available"
 
 --- DATA ---
 
-OPEN SAP ROLES (from internal jobs database):
+OPEN SAP ROLES (jobs_norm database):
 ${formatJobs(jobsData)}
 
-COMPANY INTEL (last 90 days):
+COMPANY SAP PROFILE (companies database):
+${formatProfile(profile)}
+
+WEB INTEL (last 90 days):
 ${formatIntel(intel)}
 
-DECISION MAKERS (LinkedIn X-ray):
-${formatDecisionMakers(decisionMakers)}
-
-PAST SUBMISSIONS / PLACEMENTS:
-${formatCandidates(candidates)}`;
+DECISION MAKERS (our database):
+${formatDecisionMakers(decisionMakers)}`;
 
   const response = await anthropicClient.messages.create({
     model: 'claude-haiku-4-5-20251001',
