@@ -1,17 +1,29 @@
 'use strict';
 
+function buildPrefixRange(query) {
+  const firstWord = query.trim().split(/\s+/)[0];
+  const prefix = firstWord.charAt(0).toUpperCase() + firstWord.slice(1).toLowerCase();
+  return { prefix, suffix: prefix + '\uf8ff' };
+}
+
 async function getCompanyProfile(db, company) {
-  const suffix = company + '\uf8ff';
+  const { prefix, suffix } = buildPrefixRange(company);
+  const queryLower = company.trim().toLowerCase();
 
   const snap = await db.collection('companies')
-    .where('companyName', '>=', company)
+    .where('companyName', '>=', prefix)
     .where('companyName', '<=', suffix)
-    .limit(1)
     .get();
 
   if (snap.empty) return null;
 
-  const d = snap.docs[0].data();
+  // Pick the best case-insensitive match
+  const match = snap.docs.find((doc) =>
+    (doc.data().companyName || '').toLowerCase().includes(queryLower)
+  );
+  if (!match) return null;
+
+  const d = match.data();
   return {
     name: d.companyName || d.name || company,
     tier: d.tierInfo?.tier || null,

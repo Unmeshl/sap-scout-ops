@@ -27,12 +27,22 @@ function detectModule(title) {
   return 'SAP (Other)';
 }
 
+// Firestore prefix queries are case-sensitive. To handle mixed casing from the
+// user (e.g. "harvey nash" vs "Harvey Nash"), we query on just the first word
+// title-cased, then filter the full match case-insensitively in memory.
+function buildPrefixRange(query) {
+  const firstWord = query.trim().split(/\s+/)[0];
+  const prefix = firstWord.charAt(0).toUpperCase() + firstWord.slice(1).toLowerCase();
+  return { prefix, suffix: prefix + '\uf8ff' };
+}
+
 async function searchJobsCollection(db, company) {
-  const suffix = company + '\uf8ff';
+  const { prefix, suffix } = buildPrefixRange(company);
+  const queryLower = company.trim().toLowerCase();
   const now = Date.now();
 
   const snapshot = await db.collection('jobs_norm')
-    .where('companyName', '>=', company)
+    .where('companyName', '>=', prefix)
     .where('companyName', '<=', suffix)
     .get();
 
@@ -40,6 +50,8 @@ async function searchJobsCollection(db, company) {
   const jobs = snapshot.docs
     .map((doc) => {
       const d = doc.data();
+      // Case-insensitive full-name match (handles "Harvey nash" → "Harvey Nash")
+      if (!(d.companyName || '').toLowerCase().includes(queryLower)) return null;
       // filter duplicates in-memory to avoid composite index requirement
       if (d.isDuplicate === true) return null;
 
