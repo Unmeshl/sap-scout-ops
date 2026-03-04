@@ -1,24 +1,37 @@
 'use strict';
 
-function buildPrefixRange(query) {
+function prefixRanges(query) {
   const firstWord = query.trim().split(/\s+/)[0];
-  const prefix = firstWord.charAt(0).toUpperCase() + firstWord.slice(1).toLowerCase();
-  return { prefix, suffix: prefix + '\uf8ff' };
+  const upper = firstWord.charAt(0).toUpperCase() + firstWord.slice(1);
+  const lower = firstWord.charAt(0).toLowerCase() + firstWord.slice(1);
+  return [
+    { start: upper, end: upper + '\uf8ff' },
+    ...(lower !== upper ? [{ start: lower, end: lower + '\uf8ff' }] : []),
+  ];
 }
 
 async function getCompanyProfile(db, company) {
-  const { prefix, suffix } = buildPrefixRange(company);
+  const ranges = prefixRanges(company);
   const queryLower = company.trim().toLowerCase();
 
-  const snap = await db.collection('companies')
-    .where('companyName', '>=', prefix)
-    .where('companyName', '<=', suffix)
-    .get();
+  const snapshots = await Promise.all(
+    ranges.map((r) =>
+      db.collection('companies')
+        .where('companyName', '>=', r.start)
+        .where('companyName', '<=', r.end)
+        .get()
+    )
+  );
 
-  if (snap.empty) return null;
+  const allDocs = [];
+  const seen = new Set();
+  for (const snap of snapshots) {
+    for (const doc of snap.docs) {
+      if (!seen.has(doc.id)) { seen.add(doc.id); allDocs.push(doc); }
+    }
+  }
 
-  // Pick the best case-insensitive match
-  const match = snap.docs.find((doc) =>
+  const match = allDocs.find((doc) =>
     (doc.data().companyName || '').toLowerCase().includes(queryLower)
   );
   if (!match) return null;

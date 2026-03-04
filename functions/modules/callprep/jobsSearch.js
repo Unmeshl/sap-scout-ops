@@ -27,30 +27,47 @@ function detectModule(title) {
   return 'SAP (Other)';
 }
 
-// Firestore prefix queries are case-sensitive. To handle mixed casing from the
-// user (e.g. "harvey nash" vs "Harvey Nash"), we query on just the first word
-// title-cased, then filter the full match case-insensitively in memory.
-function buildPrefixRange(query) {
+// Firestore range queries are case-sensitive (uppercase sorts before lowercase).
+// Solution: run two parallel prefix queries — one uppercase-first, one
+// lowercase-first — merge the docs, then filter case-insensitively in memory.
+function prefixRanges(query) {
   const firstWord = query.trim().split(/\s+/)[0];
-  const prefix = firstWord.charAt(0).toUpperCase() + firstWord.slice(1).toLowerCase();
-  return { prefix, suffix: prefix + '\uf8ff' };
+  const upper = firstWord.charAt(0).toUpperCase() + firstWord.slice(1);
+  const lower = firstWord.charAt(0).toLowerCase() + firstWord.slice(1);
+  return [
+    { start: upper, end: upper + '\uf8ff' },
+    ...(lower !== upper ? [{ start: lower, end: lower + '\uf8ff' }] : []),
+  ];
 }
 
 async function searchJobsCollection(db, company) {
-  const { prefix, suffix } = buildPrefixRange(company);
+  const ranges = prefixRanges(company);
   const queryLower = company.trim().toLowerCase();
   const now = Date.now();
 
-  const snapshot = await db.collection('jobs_norm')
-    .where('companyName', '>=', prefix)
-    .where('companyName', '<=', suffix)
-    .get();
+  const snapshots = await Promise.all(
+    ranges.map((r) =>
+      db.collection('jobs_norm')
+        .where('companyName', '>=', r.start)
+        .where('companyName', '<=', r.end)
+        .get()
+    )
+  );
+
+  // Merge docs, deduplicate by id
+  const seen = new Set();
+  const allDocs = [];
+  for (const snap of snapshots) {
+    for (const doc of snap.docs) {
+      if (!seen.has(doc.id)) { seen.add(doc.id); allDocs.push(doc); }
+    }
+  }
 
   let companyDomain = null;
-  const jobs = snapshot.docs
+  const jobs = allDocs
     .map((doc) => {
       const d = doc.data();
-      // Case-insensitive full-name match (handles "Harvey nash" → "Harvey Nash")
+      // Case-insensitive full-name match
       if (!(d.companyName || '').toLowerCase().includes(queryLower)) return null;
       // filter duplicates in-memory to avoid composite index requirement
       if (d.isDuplicate === true) return null;
